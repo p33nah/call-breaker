@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Call Breaker</title>
+    <style>
+      :root {
+        --bg: #0f1118;
+        --panel: #151826;
+        --ink: #dfe6ff;
+        --muted: #9aa3c7;
+        --accent: #6ce5ff;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      }
+      .wrap {
+        min-height: 100%;
+        display: grid;
+        place-items: center;
+        padding: 16px;
+      }
+      .frame {
+        width: min(96vw, 1100px);
+        background: linear-gradient(180deg, var(--panel), #0c0f1c);
+        border: 1px solid #26304e;
+        border-radius: 16px;
+        padding: 12px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5),
+          inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+      }
+      .topbar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 8px;
+        padding: 6px 8px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+      }
+      .stat {
+        font-weight: 600;
+        margin-right: 14px;
+      }
+      button {
+        cursor: pointer;
+        background: var(--accent);
+        color: #04121a;
+        border: none;
+        border-radius: 10px;
+        padding: 8px 12px;
+        font-weight: 700;
+      }
+      button.muted {
+        background: #2c3153;
+        color: #c9cff8;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: auto;
+        border-radius: 12px;
+        background: #0a0d1a;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+      }
+      .overlay {
+        position: relative;
+      }
+      .overlay .panel {
+        position: absolute;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        background: linear-gradient(
+          180deg,
+          rgba(9, 11, 24, 0.65),
+          rgba(9, 11, 24, 0.8)
+        );
+        backdrop-filter: blur(2px);
+        border-radius: 12px;
+      }
+      .overlay .panel.visible {
+        display: flex;
+      }
+      .overlay h1 {
+        margin: 0 0 8px;
+      }
+      .overlay p {
+        margin: 0 0 16px;
+        opacity: 0.9;
+      }
+      .legend {
+        opacity: 0.75;
+        margin: 10px 4px 0;
+        font-size: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="frame">
+        <div class="topbar">
+          <div class="stat">Score: <span id="score">0</span></div>
+          <div class="stat">Meetings: <span id="left">0</span></div>
+          <div class="stat">Week: <span id="week">1</span></div>
+          <!-- <button id="pauseBtn" class="muted" aria-pressed="false" title="P">
+            Pause
+          </button>
+          <button id="resetBtn" title="Restart">Restart</button> -->
+        </div>
+
+        <div class="overlay">
+          <canvas
+            id="game"
+            width="1100"
+            height="700"
+            aria-label="Calendar brick-breaker canvas"
+          ></canvas>
+          <div
+            id="overlay"
+            class="panel"
+            role="dialog"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            <div>
+              <!-- <h1 id="overlayTitle">Paused</h1>
+              <p id="overlayText">Press P or click Resume to continue.</p>
+              <div style="display: flex; gap: 10px; justify-content: center">
+                <button id="resumeBtn">Resume</button>
+                <button id="playAgainBtn" class="muted">Play Again</button>
+              </div> -->
+            </div>
+          </div>
+        </div>
+
+        <!-- <p class="legend">
+          Controls: <strong>← / →</strong> (or mouse/touch). Hit a meeting to
+          “clear” it; a new random one appears. Press <strong>P</strong> to
+          pause.
+        </p> -->
+      </div>
+    </div>
+
+    <script>
+      ;(() => {
+        // ======= CONFIG YOU CAN TUNE =======
+        const startHour = 8 // visible window start
+        const endHour = 21 // visible window end
+        const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+        const TARGET_MEETINGS = days.length * 6 // how full the board starts
+
+        // Ball speed (increased initial speed)
+        const BASE_BALL_SPEED = 10 // was ~0.52
+        const SPEED_PER_WEEK = 2 // grows as you clear weeks
+
+        // Slotting
+        const SLOT_MINUTES = 30 // align starts to 30-min slots
+        const DURATIONS = [30, 45, 60, 60, 90, 120]
+        const COLORS = [
+          '#24306b',
+          '#232b62',
+          '#1f2756',
+          '#2b316a',
+          '#283a7e',
+          '#1e2c58',
+          '#233b74'
+        ]
+        const TITLE_WORDS = [
+          'Standup',
+          'Sync',
+          'Retro',
+          'Planning',
+          'Design Review',
+          'KT',
+          'Onboarding',
+          'Stakeholder',
+          'Presale',
+          '1:1',
+          'Roadmap',
+          'Bug Triage',
+          'Demo',
+          'Sprint Review',
+          'Ops Handoff',
+          'Architecture',
+          'GTM',
+          'Growth',
+          'Support',
+          'Deep Work',
+          'Client Update',
+          'Check‑in'
+        ]
+        // ===================================
+
+        const canvas = document.getElementById('game')
+        const ctx = canvas.getContext('2d')
+
+        const scoreEl = document.getElementById('score')
+        const leftEl = document.getElementById('left')
+        const weekEl = document.getElementById('week')
+        const pauseBtn = document.getElementById('pauseBtn')
+        const resetBtn = document.getElementById('resetBtn')
+        const overlay = document.getElementById('overlay')
+        const overlayTitle = document.getElementById('overlayTitle')
+        const overlayText = document.getElementById('overlayText')
+        const resumeBtn = document.getElementById('resumeBtn')
+        const playAgainBtn = document.getElementById('playAgainBtn')
+
+        const state = {
+          running: true,
+          score: 0,
+          week: 1,
+          ball: { x: 0, y: 0, r: 0, vx: 0, vy: 0, speed: 0 },
+          paddle: { x: 0, y: 0, w: 0, h: 0, speed: 0 },
+          keys: { left: false, right: false },
+          meetings: [], // logical meetings (with minutes)
+          blocks: [], // placed rectangles with titles (linked to meeting id)
+          layout: {}, // computed sizes
+          lastTime: 0,
+          nextId: 1
+        }
+
+        function clamp(v, a, b) {
+          return Math.max(a, Math.min(b, v))
+        }
+        function randChoice(arr) {
+          return arr[Math.floor(Math.random() * arr.length)]
+        }
+        function timeToMinutes(t) {
+          const [H, M] = t.split(':').map(Number)
+          return H * 60 + M
+        }
+        function minutesToStr(m) {
+          const h = Math.floor(m / 60),
+            mm = m % 60
+          return (h < 10 ? '0' : '') + h + ':' + (mm < 10 ? '0' : '') + mm
+        }
+
+        // ---------- Layout ----------
+        function fitToContainer(cnv) {
+          const ratio = window.devicePixelRatio || 1
+          const displayWidth = cnv.clientWidth
+          const displayHeight = Math.round(displayWidth * 0.64)
+          cnv.style.height = displayHeight + 'px'
+          const newW = Math.floor(displayWidth * ratio)
+          const newH = Math.floor(displayHeight * ratio)
+          if (cnv.width !== newW || cnv.height !== newH) {
+            cnv.width = newW
+            cnv.height = newH
+            computeLayout()
+          }
+        }
+
+        function computeLayout() {
+          const W = canvas.width,
+            H = canvas.height
+          const headerH = Math.round(H * 0.09)
+          const gutterW = Math.round(W * 0.08)
+          const gridX = gutterW
+          const gridY = headerH
+          const gridW = W - gutterW - Math.round(W * 0.006)
+          const gridH = H - headerH - Math.round(H * 0.02)
+          const colW = gridW / days.length
+          const totalMinutes = (endHour - startHour) * 60
+          state.layout = {
+            W,
+            H,
+            headerH,
+            gutterW,
+            gridX,
+            gridY,
+            gridW,
+            gridH,
+            colW,
+            totalMinutes
+          }
+          relayoutBlocks()
+          resetBallAndPaddle()
+        }
+
+        function mapMeetingToBlock(m) {
+          const L = state.layout
+          const gap = Math.max(2, Math.round(L.W * 0.0025))
+          const startRel = clamp(m.startMin - startHour * 60, 0, L.totalMinutes)
+          const endRel = clamp(m.endMin - startHour * 60, 0, L.totalMinutes)
+          const x = Math.round(L.gridX + m.day * L.colW + gap)
+          const y = Math.round(
+            L.gridY + (startRel / L.totalMinutes) * L.gridH + gap
+          )
+          const w = Math.round(L.colW - gap * 2)
+          const h = Math.max(
+            18,
+            Math.round(
+              ((endRel - startRel) / L.totalMinutes) * L.gridH - gap * 2
+            )
+          )
+          return {
+            id: m.id,
+            x,
+            y,
+            w,
+            h,
+            title: m.title,
+            color: m.color,
+            hits: 1
+          }
+        }
+
+        function relayoutBlocks() {
+          state.blocks = state.meetings.map(mapMeetingToBlock)
+          leftEl.textContent = state.blocks.length
+        }
+
+        // ---------- Meeting generation ----------
+        function overlaps(a, b) {
+          if (a.day !== b.day) return false
+          return a.startMin < b.endMin && b.startMin < a.endMin
+        }
+
+        function randomTitle() {
+          const a = randChoice(TITLE_WORDS)
+          // 30% chance to add a qualifier
+          if (Math.random() < 0.3) {
+            const b = randChoice([
+              'v2',
+              'Review',
+              'Touchpoint',
+              '(External)',
+              '(Internal)',
+              'Sprint',
+              'Quarterly',
+              'H1'
+            ])
+            return `${a} ${b}`
+          }
+          return a
+        }
+
+        function randomMeeting(existing) {
+          const day = Math.floor(Math.random() * days.length)
+          const color = randChoice(COLORS)
+          const duration = randChoice(DURATIONS)
+          const minStart = startHour * 60
+          const maxStart = endHour * 60 - duration
+
+          // pick a start aligned to SLOT_MINUTES
+          let tryCount = 0,
+            startMin,
+            endMin
+          let ok = false
+          while (tryCount++ < 200) {
+            const slotCount =
+              Math.floor((maxStart - minStart) / SLOT_MINUTES) + 1
+            startMin =
+              minStart + Math.floor(Math.random() * slotCount) * SLOT_MINUTES
+            endMin = startMin + duration
+            const candidate = { day, startMin, endMin }
+            ok = !existing.some(m => overlaps(m, candidate))
+            if (ok) break
+          }
+          if (!ok) {
+            // give up on strict non-overlap; allow one overlap
+            startMin =
+              minStart + Math.floor(Math.random() * (maxStart - minStart))
+            startMin -= startMin % SLOT_MINUTES
+            endMin = Math.min(startMin + duration, endHour * 60)
+          }
+
+          return {
+            id: state.nextId++,
+            title: randomTitle(),
+            day,
+            startMin,
+            endMin,
+            color
+          }
+        }
+
+        function seedMeetings() {
+          state.meetings = []
+          // a couple of fixed examples to resemble the screenshot
+          state.meetings.push({
+            id: state.nextId++,
+            title: 'BO web portal — Presale',
+            day: 0,
+            startMin: timeToMinutes('15:00'),
+            endMin: timeToMinutes('16:00'),
+            color: '#24306b'
+          })
+          state.meetings.push({
+            id: state.nextId++,
+            title: 'KT — Accessibility',
+            day: 3,
+            startMin: timeToMinutes('15:00'),
+            endMin: timeToMinutes('17:00'),
+            color: '#232b62'
+          })
+          // fill up with randoms
+          while (state.meetings.length < TARGET_MEETINGS) {
+            state.meetings.push(randomMeeting(state.meetings))
+          }
+          relayoutBlocks()
+        }
+
+        function addRandomMeetingNow() {
+          const m = randomMeeting(state.meetings)
+          state.meetings.push(m)
+          state.blocks.push(mapMeetingToBlock(m))
+          leftEl.textContent = state.blocks.length
+        }
+
+        // ---------- Ball / Paddle ----------
+        function resetBallAndPaddle() {
+          const L = state.layout
+          state.ball.r = Math.round(Math.min(L.W, L.H) * 0.012)
+          state.ball.x = L.gridX + L.gridW / 2
+          state.ball.y = L.gridY + L.gridH * 0.82
+
+          const speed = BASE_BALL_SPEED + (state.week - 1) * SPEED_PER_WEEK
+          const angle = Math.random() * 0.7 + 0.4
+          const sign = Math.random() < 0.5 ? -1 : 1
+
+          state.ball.vx = Math.cos(angle) * speed * sign
+          state.ball.vy = -Math.sin(angle) * speed
+          state.ball.speed = speed
+
+          state.paddle.w = Math.round(L.gridW * 0.18)
+          state.paddle.h = Math.round(L.H * 0.02)
+          state.paddle.x = L.gridX + (L.gridW - state.paddle.w) / 2
+          state.paddle.y =
+            L.gridY + L.gridH - state.paddle.h - Math.round(L.H * 0.02)
+          state.paddle.speed = L.W * 0.8
+        }
+
+        // ---------- Input ----------
+        window.addEventListener('resize', () => fitToContainer(canvas))
+        document.addEventListener('keydown', e => {
+          if (e.key === 'ArrowLeft') state.keys.left = true
+          if (e.key === 'ArrowRight') state.keys.right = true
+        })
+        document.addEventListener('keyup', e => {
+          if (e.key === 'ArrowLeft') state.keys.left = false
+          if (e.key === 'ArrowRight') state.keys.right = false
+        })
+        canvas.addEventListener('mousemove', e => {
+          const rect = canvas.getBoundingClientRect()
+          const scale = canvas.width / rect.width
+          const px = (e.clientX - rect.left) * scale
+          const minX = state.layout.gridX
+          const maxX = state.layout.gridX + state.layout.gridW - state.paddle.w
+          state.paddle.x = clamp(px - state.paddle.w / 2, minX, maxX)
+        })
+        canvas.addEventListener(
+          'touchmove',
+          e => {
+            e.preventDefault()
+            const rect = canvas.getBoundingClientRect()
+            const scale = canvas.width / rect.width
+            const px = (e.touches[0].clientX - rect.left) * scale
+            const minX = state.layout.gridX
+            const maxX =
+              state.layout.gridX + state.layout.gridW - state.paddle.w
+            state.paddle.x = clamp(px - state.paddle.w / 2, minX, maxX)
+          },
+          { passive: false }
+        )
+
+        function showOverlay(title, text, playAgain = false) {
+          overlayTitle.textContent = title
+          overlayText.textContent = text
+          overlay.classList.add('visible')
+          overlay.style.display = 'flex'
+          playAgainBtn.style.display = playAgain ? 'inline-block' : 'none'
+        }
+        function hideOverlay() {
+          overlay.classList.remove('visible')
+          overlay.style.display = 'none'
+        }
+
+        // ---------- Drawing ----------
+        function drawRoundedRect(x, y, w, h, r) {
+          ctx.beginPath()
+          ctx.moveTo(x + r, y)
+          ctx.arcTo(x + w, y, x + w, y + h, r)
+          ctx.arcTo(x + w, y + h, x, y + h, r)
+          ctx.arcTo(x, y + h, x, y, r)
+          ctx.arcTo(x, y, x + w, y, r)
+          ctx.closePath()
+        }
+
+        function drawCalendarBackground() {
+          const L = state.layout
+          ctx.fillStyle = '#090c18'
+          ctx.fillRect(0, 0, L.W, L.H)
+
+          ctx.fillStyle = '#0b0e1c' // header
+          ctx.fillRect(0, 0, L.W, L.headerH)
+          ctx.fillStyle = 'rgba(255,255,255,.03)'
+          ctx.fillRect(0, L.headerH - 1, L.W, 1)
+
+          ctx.fillStyle = '#0b0e1c' // gutter
+          ctx.fillRect(0, 0, L.gutterW, L.H)
+
+          for (let d = 0; d < days.length; d++) {
+            const x = Math.round(L.gridX + d * L.colW)
+            if (d % 2 === 1) {
+              ctx.fillStyle = 'rgba(255,255,255,.015)'
+              ctx.fillRect(x, L.gridY, Math.ceil(L.colW), L.gridH)
+            }
+            ctx.fillStyle = 'rgba(255,255,255,.06)'
+            ctx.fillRect(x, L.gridY, 1, L.gridH)
+
+            ctx.fillStyle = '#dfe6ff'
+            ctx.font = Math.round(L.headerH * 0.35) + 'px system-ui'
+            ctx.textBaseline = 'middle'
+            ctx.fillText(days[d], x + 12, L.headerH / 2)
+          }
+          ctx.fillStyle = 'rgba(255,255,255,.06)'
+          ctx.fillRect(L.gridX + L.gridW, L.gridY, 1, L.gridH)
+
+          ctx.strokeStyle = '#2a2e44'
+          ctx.lineWidth = 1
+          ctx.fillStyle = '#9aa3c7'
+          ctx.font = Math.max(11, Math.round(L.headerH * 0.22)) + 'px system-ui'
+          ctx.textBaseline = 'middle'
+          for (let h = startHour; h <= endHour; h++) {
+            const t = ((h * 60 - startHour * 60) / L.totalMinutes) * L.gridH
+            const y = Math.round(L.gridY + t)
+            ctx.beginPath()
+            ctx.moveTo(L.gridX, y)
+            ctx.lineTo(L.gridX + L.gridW, y)
+            ctx.stroke()
+            const label = (h < 10 ? '0' : '') + h + ':00'
+            ctx.fillText(label, 8, y)
+          }
+        }
+
+        function drawMeetings() {
+          for (const b of state.blocks) {
+            drawRoundedRect(b.x, b.y, b.w, b.h, Math.min(12, b.h - 2))
+            const g = ctx.createLinearGradient(b.x, b.y, b.x, b.y + b.h)
+            g.addColorStop(0, '#000000')
+            g.addColorStop(1, b.color || '#1b2350')
+            ctx.fillStyle = g
+            ctx.fill()
+
+            ctx.globalAlpha = 0.28
+            ctx.strokeStyle = '#9aa8ff'
+            ctx.stroke()
+            ctx.globalAlpha = 1
+
+            // title (simple wrap)
+            ctx.save()
+            ctx.beginPath()
+            drawRoundedRect(
+              b.x + 4,
+              b.y + 4,
+              b.w - 8,
+              b.h - 8,
+              Math.min(8, b.h - 8)
+            )
+            ctx.clip()
+            ctx.fillStyle = '#e8ecff'
+            const fs = Math.max(12, Math.min(18, Math.floor(b.h * 0.28)))
+            ctx.font = fs + 'px system-ui'
+            ctx.textBaseline = 'top'
+            const words = b.title.split(' ')
+            const pad = 8
+            let line = '',
+              y = b.y + pad,
+              x = b.x + pad
+            for (const w of words) {
+              const test = (line ? line + ' ' : '') + w
+              if (ctx.measureText(test).width > b.w - pad * 2) {
+                ctx.fillText(line, x, y)
+                y += fs + 2
+                line = w
+                if (y > b.y + b.h - pad - fs) break
+              } else line = test
+            }
+            if (y <= b.y + b.h - pad) ctx.fillText(line, x, y)
+            ctx.restore()
+          }
+          ctx.globalAlpha = 0.15
+          ctx.fillStyle = '#fff'
+          ctx.fillRect(0, state.layout.H - 2, state.layout.W, 2)
+          ctx.globalAlpha = 1
+        }
+
+        function drawBallAndPaddle() {
+          const b = state.ball,
+            p = state.paddle
+          ctx.globalAlpha = 0.12
+          ctx.beginPath()
+          ctx.arc(b.x, b.y, b.r * 2.2, 0, Math.PI * 2)
+          ctx.fillStyle = '#b7e8ff'
+          ctx.fill()
+          ctx.globalAlpha = 1
+
+          ctx.beginPath()
+          ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2)
+          const grad = ctx.createRadialGradient(
+            b.x - b.r / 3,
+            b.y - b.r / 3,
+            b.r / 4,
+            b.x,
+            b.y,
+            b.r
+          )
+          grad.addColorStop(0, '#ffffff')
+          grad.addColorStop(1, '#6ce5ff')
+          ctx.fillStyle = grad
+          ctx.fill()
+
+          drawRoundedRect(p.x, p.y, p.w, p.h, Math.min(10, p.h))
+          const padGrad = ctx.createLinearGradient(0, p.y, 0, p.y + p.h)
+          padGrad.addColorStop(0, '#b4c8ff')
+          padGrad.addColorStop(1, '#6b85ff')
+          ctx.fillStyle = padGrad
+          ctx.fill()
+        }
+
+        // ---------- Physics ----------
+        function rectCircleCollision(rx, ry, rw, rh, cx, cy, cr) {
+          const nx = Math.max(rx, Math.min(cx, rx + rw))
+          const ny = Math.max(ry, Math.min(cy, ry + rh))
+          const dx = cx - nx,
+            dy = cy - ny
+          return dx * dx + dy * dy <= cr * cr
+        }
+        function reflectFromPaddle() {
+          const c = state.paddle.x + state.paddle.w / 2
+          const dist = (state.ball.x - c) / (state.paddle.w / 2)
+          const maxAngle = Math.PI * 0.72
+          const angle = (Math.PI - maxAngle) / 2 + (dist + 1) * (maxAngle / 2)
+          const speed = Math.hypot(state.ball.vx, state.ball.vy)
+          state.ball.vx = Math.cos(angle) * speed
+          state.ball.vy = -Math.abs(Math.sin(angle) * speed)
+        }
+
+        function update(dt) {
+          const L = state.layout,
+            b = state.ball,
+            p = state.paddle
+
+          const move = (state.keys.right ? 1 : 0) - (state.keys.left ? 1 : 0)
+          if (move !== 0) {
+            p.x += move * p.speed * dt
+            p.x = clamp(p.x, L.gridX, L.gridX + L.gridW - p.w)
+          }
+
+          b.x += b.vx
+          b.y += b.vy
+
+          const leftWall = L.gridX,
+            rightWall = L.gridX + L.gridW,
+            topWall = L.gridY
+          if (b.x - b.r < leftWall) {
+            b.x = leftWall + b.r
+            b.vx = Math.abs(b.vx)
+          }
+          if (b.x + b.r > rightWall) {
+            b.x = rightWall - b.r
+            b.vx = -Math.abs(b.vx)
+          }
+          if (b.y - b.r < topWall) {
+            b.y = topWall + b.r
+            b.vy = Math.abs(b.vy)
+          }
+
+          if (
+            b.vy > 0 &&
+            rectCircleCollision(p.x, p.y, p.w, p.h, b.x, b.y, b.r)
+          ) {
+            b.y = p.y - b.r - 0.5
+            reflectFromPaddle()
+          }
+
+          // meeting collisions -> remove and immediately add a new random meeting
+          for (let i = state.blocks.length - 1; i >= 0; i--) {
+            const m = state.blocks[i]
+            if (rectCircleCollision(m.x, m.y, m.w, m.h, b.x, b.y, b.r)) {
+              const prevX = b.x - b.vx,
+                prevY = b.y - b.vy
+              const insidePrevX = prevX >= m.x && prevX <= m.x + m.w
+              const insidePrevY = prevY >= m.y && prevY <= m.y + m.h
+              if (!insidePrevX) b.vx *= -1
+              if (!insidePrevY) b.vy *= -1
+
+              // remove logical + visual
+              const removed = state.blocks.splice(i, 1)[0]
+              const idx = state.meetings.findIndex(mm => mm.id === removed.id)
+              if (idx !== -1) state.meetings.splice(idx, 1)
+              state.score += 10
+              leftEl.textContent = state.blocks.length
+
+              // spawn a fresh random meeting
+              addRandomMeetingNow()
+              break
+            }
+          }
+
+          // miss -> relaunch ball (keep the week going)
+          if (b.y - b.r > L.H) {
+            resetBallAndPaddle()
+          }
+
+          // optional: when board gets sparse for any reason, top it up
+          if (
+            state.blocks.length <
+            TARGET_MEETINGS - Math.floor(days.length / 2)
+          ) {
+            addRandomMeetingNow()
+          }
+
+          scoreEl.textContent = state.score
+          weekEl.textContent = state.week
+        }
+
+        function draw() {
+          drawCalendarBackground()
+          drawMeetings()
+          drawBallAndPaddle()
+        }
+
+        function loop(t) {
+          if (!state.running) return
+          const dt = Math.min((t - state.lastTime) / 1000, 1 / 15)
+          state.lastTime = t
+          update(dt)
+          draw()
+          requestAnimationFrame(loop)
+        }
+
+        // ---------- Boot ----------
+        function start() {
+          fitToContainer(canvas)
+          seedMeetings()
+          relayoutBlocks()
+          resetBallAndPaddle()
+          state.lastTime = performance.now()
+          requestAnimationFrame(loop)
+        }
+        start()
+      })()
+    </script>
+  </body>
+</html>
